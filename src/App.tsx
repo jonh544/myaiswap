@@ -330,7 +330,38 @@ function App() {
     }
     setApiState('requesting')
     try {
-      const token = await invoke<string>('create_fal_realtime_token')
+      let token: string
+      if (isTauri()) {
+        token = await invoke<string>('create_fal_realtime_token')
+      } else {
+        let response: Response
+        try {
+          response = await fetch('/api/fal/realtime-token', {
+            method: 'POST',
+            headers: { Accept: 'application/json' },
+          })
+        } catch {
+          throw new Error('Could not reach the token service. Check your connection or deployment configuration.')
+        }
+        const body: unknown = await response.json().catch(() => null)
+        if (!response.ok) {
+          const message = typeof body === 'object' && body !== null && 'error' in body
+            && typeof body.error === 'string'
+            ? body.error
+            : `Token service request failed (HTTP ${response.status}).`
+          throw new Error(message)
+        }
+        if (
+          typeof body !== 'object'
+          || body === null
+          || !('token' in body)
+          || typeof body.token !== 'string'
+          || !body.token.trim()
+        ) {
+          throw new Error('Token service returned an invalid response.')
+        }
+        token = body.token
+      }
       setApiState('token-issued')
       return token
     } catch (tokenError) {
@@ -812,7 +843,7 @@ function App() {
         <label className="setting-row"><div><strong>Prompt expansion</strong><small>Allow Lucy to expand or enhance the prompt before applying it.</small></div><input type="checkbox" checked={settings.enablePromptExpansion} onChange={(event) => setSettings((current) => ({ ...current, enablePromptExpansion: event.target.checked }))} /></label>
         <label className="setting-row"><div><strong>Refresh devices after camera connection</strong><small>Update the device list after camera permissions are granted.</small></div><input type="checkbox" checked={settings.autoRefreshDevices} onChange={(event) => setSettings((current) => ({ ...current, autoRefreshDevices: event.target.checked }))} /></label>
       </div>
-      <div className="secure-config-card"><ShieldCheck size={19} /><div><strong>API credentials stay in the backend</strong><p>FAL_KEY is read by the Rust/Tauri process environment. It is never stored in app settings or exposed to frontend code. Set the key before launching the desktop app.</p></div></div>
+      <div className="secure-config-card"><ShieldCheck size={19} /><div><strong>API credentials stay in the backend</strong><p>FAL_KEY is read only by the Rust/Tauri process or the Vercel token function. It is never stored in app settings or exposed to frontend code. Configure it in the environment for your runtime.</p></div></div>
       {settingsError ? <div className="error-banner" role="alert"><AlertCircle size={16} /><span>{settingsError}</span></div> : null}
     </section>
   )
@@ -826,7 +857,7 @@ function App() {
         <div className="diagnostic-cell"><span><ShieldCheck size={16} /> API token</span><strong>{apiState === 'connected' ? 'Short-lived token used' : apiState === 'token-issued' ? 'Token issued (120s)' : apiState === 'requesting' ? 'Request in progress' : apiState === 'error' ? 'Request failed' : 'Not requested'}</strong></div>
         <div className="diagnostic-cell"><span><Camera size={16} /> Camera permission</span><strong>{permissionStatus === 'granted' ? 'Granted' : permissionStatus === 'blocked' ? 'Denied or unavailable' : 'Not requested'}</strong></div>
         <div className="diagnostic-cell"><span><Video size={16} /> Remote video</span><strong>{remoteStream ? 'Remote track received' : 'No remote track received'}</strong></div>
-        <div className="diagnostic-cell"><span><Cpu size={16} /> Runtime</span><strong>{isTauri() ? 'Tauri desktop webview' : 'Browser development preview'}</strong></div>
+        <div className="diagnostic-cell"><span><Cpu size={16} /> Runtime</span><strong>{isTauri() ? 'Tauri desktop webview' : 'Browser (Vite or Vercel)'}</strong></div>
       </div>
       <div className="notice-box diagnostics-notice"><AlertCircle size={16} /><span>WebRTC operation, camera/microphone permissions, and model output still require real-device testing on macOS and Windows. No virtual camera or virtual audio output is implemented.</span></div>
     </section>

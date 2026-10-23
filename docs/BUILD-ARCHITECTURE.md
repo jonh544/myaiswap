@@ -15,9 +15,9 @@ This application follows a Tauri 2 desktop architecture with a Rust backend and 
 
 ## Why this architecture
 
-Tauri provides a native shell and Rust backend without a separate web server. The Rust command reads `FAL_KEY` from the process environment and requests a 120-second fal token restricted to `decart/lucy-2-5/realtime`. The frontend receives only that short-lived token and uses the official `@fal-ai/client` realtime WebSocket client alongside the endpoint's WebRTC signaling flow.
+Tauri provides a native shell and Rust backend without a separate web server. The Rust command reads `FAL_KEY` from the process environment. Browser deployments use the Vercel function at `/api/fal/realtime-token`, which reads the Vercel `FAL_KEY` environment variable. Both paths request a 120-second fal token restricted to `decart/lucy-2-5/realtime`. The frontend receives only that short-lived token and uses the official `@fal-ai/client` realtime WebSocket client alongside the endpoint's WebRTC signaling flow.
 
-The fal token command takes no caller-supplied endpoint or key, has an in-process rate limit, and does not log credentials or token responses. Configure `FAL_KEY` in the environment that launches the Tauri process; it is not a Vite variable and must never use a `VITE_` prefix.
+The fal token request accepts no caller-supplied endpoint or key and does not log credentials or token responses. The web route rejects cross-origin requests. Configure `FAL_KEY` only in the Tauri process environment, `.env.local` for Vite's development middleware, or Vercel's server-side environment settings; it must never use a `VITE_` prefix.
 
 Lucy 2.5 accepts a prompt and optional reference image for character swap/virtual try-on; the reference image must be PNG, JPEG, or WebP and at least 512 × 512. In WebRTC mode, the camera stream is sent as media, not through the separate `image_url` input. The microphone is selectable for device management but this video-to-video endpoint does not process microphone audio.
 
@@ -46,6 +46,7 @@ The app uses local JSON or SQLite-backed storage for configuration and session m
 - `npm install` to install frontend dependencies
 - `npm run build` to check the React/Vite build
 - Set `FAL_KEY` in the launching process environment, then run `npx tauri dev`
+- For Vercel, set server-side `FAL_KEY` and use `dist` as the build output directory
 - Platform-specific native validation is required on each target OS before production claims
 
 ## Important limitations

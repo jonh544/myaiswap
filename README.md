@@ -46,21 +46,27 @@ npm run dev
 
 ## Configure fal.ai
 
-Set `FAL_KEY` in the environment used to launch the Tauri process. Do not put it in a `VITE_` variable or commit it.
+The browser app requests a 120-second token from `/api/fal/realtime-token`. The server function reads `FAL_KEY` and requests a token restricted to `decart/lucy-2-5/realtime`; the key is never included in frontend code. This follows fal's [realtime client token-provider guidance](https://fal.ai/docs/api-reference/client-libraries/javascript/realtime.md) and [API key guidance](https://fal.ai/docs/documentation/setting-up/authentication/index.md).
 
 ```bash
-export FAL_KEY="your-fal-api-key"
-npx tauri dev
+npm run dev
 ```
 
-On PowerShell:
+For local browser development, add `FAL_KEY=your-fal-api-key` to the ignored `.env.local` file. Vite loads it for the development-only API middleware. Do not use a `VITE_` prefix or commit the file.
 
-```powershell
-$env:FAL_KEY = "your-fal-api-key"
-npx tauri dev
-```
+### Vercel deployment settings
 
-`.env.example` documents the variable name only; Vite does not load or expose the key to the frontend. Lucy's realtime endpoint requires internet access and account access to the model.
+In the Vercel project settings:
+
+1. Set **Framework Preset** to **Vite** (or keep the detected Vite preset).
+2. Set **Build Command** to `npm run build`.
+3. Set **Output Directory** to `dist`.
+4. Under **Settings → Environment Variables**, add `FAL_KEY` with the fal.ai API key. Select **Production** and also **Preview** and **Development** if those environments should work.
+5. Redeploy after adding or changing the variable.
+
+Vercel automatically detects the root `api/` directory as Node.js Functions, so no custom route configuration is required. Do not set `VITE_FAL_KEY`: Vite-prefixed values are client-visible. The Vercel web app and desktop Tauri app use different server-side token providers; for Tauri, set `FAL_KEY` in the environment that launches the app.
+
+The token endpoint rejects cross-origin requests and only returns the short-lived restricted token. Lucy's realtime endpoint also requires fal.ai account access and internet connectivity.
 
 ## Production build
 
