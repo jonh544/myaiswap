@@ -1,9 +1,27 @@
-import type { IncomingMessage, ServerResponse } from 'node:http'
-
 const FAL_ENDPOINT = 'decart/lucy-2-5/realtime'
 const TOKEN_DURATION_SECONDS = 120
 
-function sendJson(response: ServerResponse, status: number, body: unknown) {
+type TokenRequest = {
+  method?: string
+  headers: {
+    origin?: string
+    host?: string
+  }
+}
+
+type TokenResponse = {
+  statusCode: number
+  setHeader: (name: string, value: string) => void
+  end: (body?: string) => void
+}
+
+type RuntimeGlobal = typeof globalThis & {
+  process?: {
+    env?: Record<string, string | undefined>
+  }
+}
+
+function sendJson(response: TokenResponse, status: number, body: unknown) {
   response.statusCode = status
   response.setHeader('Content-Type', 'application/json; charset=utf-8')
   response.setHeader('Cache-Control', 'no-store')
@@ -11,9 +29,9 @@ function sendJson(response: ServerResponse, status: number, body: unknown) {
 }
 
 export async function handleRealtimeTokenRequest(
-  request: IncomingMessage,
-  response: ServerResponse,
-  falKey = process.env.FAL_KEY,
+  request: TokenRequest,
+  response: TokenResponse,
+  falKey = (globalThis as RuntimeGlobal).process?.env?.FAL_KEY,
 ) {
   if (request.method !== 'POST') {
     response.setHeader('Allow', 'POST')
@@ -91,6 +109,6 @@ export async function handleRealtimeTokenRequest(
   sendJson(response, 200, { token: tokenResponse.token })
 }
 
-export default function realtimeToken(request: IncomingMessage, response: ServerResponse) {
+export default function realtimeToken(request: TokenRequest, response: TokenResponse) {
   return handleRealtimeTokenRequest(request, response)
 }
