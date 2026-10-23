@@ -1,1071 +1,882 @@
-import { type ChangeEvent, useEffect, useMemo, useRef, useState } from 'react'
-import { invoke } from '@tauri-apps/api/core'
+import { type ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { invoke, isTauri } from '@tauri-apps/api/core'
+import type { TokenProvider } from '@fal-ai/client'
 import {
   Activity,
-  ArrowRight,
+  AlertCircle,
+  ArrowDownToLine,
+  ArrowUpRight,
+  AudioLines,
   Camera,
-  CheckCircle2,
-  ChevronRight,
-  CircleAlert,
+  ChevronDown,
+  CircleHelp,
+  Clock3,
   Cpu,
-  FolderOpen,
-  ImageUp,
-  RefreshCcw,
+  ImagePlus,
+  LoaderCircle,
+  Play,
+  Plus,
+  RefreshCw,
   Settings2,
   ShieldCheck,
+  SlidersHorizontal,
   Sparkles,
-  UserRound,
+  Square,
   Video,
-  Volume2,
+  Wifi,
+  X,
 } from 'lucide-react'
+import {
+  connectLucy,
+  LUCY_ENDPOINT,
+  type LucyInput,
+  type LucySession,
+} from './lib/lucyRealtime'
 import './App.css'
 
-type ScreenName =
-  | 'studio'
-  | 'identity'
-  | 'voice'
-  | 'devices'
-  | 'history'
-  | 'settings'
-  | 'diagnostics'
-  | 'about'
+type ScreenName = 'studio' | 'identity' | 'devices' | 'history' | 'settings' | 'diagnostics'
+type SessionState = 'disconnected' | 'requesting' | 'connecting' | 'connected' | 'live' | 'error'
+type ApiState = 'unchecked' | 'requesting' | 'token-issued' | 'connected' | 'error'
 
-type AppSettings = {
-  identityName: string
-  voiceProfile: string
-  outputMode: 'virtual-camera' | 'speaker-audio'
-  autoRefresh: boolean
-  nfcEnabled: boolean
-  namifusionApiKey: string
-}
-
-type CharacterOption = {
+type ReferenceImage = {
   id: string
   name: string
-  source: string
-  preview: string
-  kind: 'library' | 'upload'
+  dataUrl: string
+  width: number
+  height: number
 }
 
-type VoiceOption = {
-  id: string
-  name: string
-  source: string
-  kind: 'sample' | 'upload'
-  provider: string
-  duration: string
-}
-
-type DeviceOption = {
+type MediaDeviceOption = {
   id: string
   label: string
-  kind: 'videoinput' | 'audioinput' | 'audiooutput'
 }
 
-type SessionRecord = {
+type HistoryRecord = {
   id: string
   title: string
-  status: 'Ready' | 'Blocked' | 'Saved'
-  note: string
-  timestamp: string
+  detail: string
+  status: 'Connected' | 'Stopped' | 'Failed'
+  createdAt: string
 }
 
-const defaultSettings: AppSettings = {
-  identityName: 'Ava Cross',
-  voiceProfile: 'night-voice',
-  outputMode: 'speaker-audio',
-  autoRefresh: true,
-  nfcEnabled: true,
-  namifusionApiKey: '',
+type AppSettings = {
+  enablePromptExpansion: boolean
+  autoRefreshDevices: boolean
 }
 
-const defaultCharacterOptions: CharacterOption[] = [
-  {
-    id: 'ava-main',
-    name: 'Ava Cross',
-    source: 'Studio capture',
-    preview: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=900&q=80',
-    kind: 'library',
-  },
-  {
-    id: 'dorian-main',
-    name: 'Dorian Slate',
-    source: 'Imported PNG',
-    preview: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&fit=crop&w=900&q=80',
-    kind: 'library',
-  },
-]
+const ENDPOINT = 'decart/lucy-2-5/realtime'
+const MINIMUM_REFERENCE_DIMENSION = 512
+const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'])
+const DEFAULT_PROMPT = 'Transform me into the character in the reference image.'
+const DEFAULT_SETTINGS: AppSettings = {
+  enablePromptExpansion: true,
+  autoRefreshDevices: true,
+}
 
-const defaultVoiceOptions: VoiceOption[] = [
-  {
-    id: 'voice-sample-1',
-    name: 'Studio sample A',
-    source: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3',
-    kind: 'sample',
-    provider: 'Local route',
-    duration: '00:18',
-  },
-  {
-    id: 'voice-sample-2',
-    name: 'Narration sample B',
-    source: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3',
-    kind: 'sample',
-    provider: 'Local route',
-    duration: '00:14',
-  },
-]
-
-const defaultSessionHistory: SessionRecord[] = [
-  {
-    id: 's1',
-    title: 'Identity pass',
-    status: 'Ready',
-    note: 'Reference photo validated and camera permissions granted.',
-    timestamp: '7:30 PM',
-  },
-  {
-    id: 's2',
-    title: 'Voice calibration',
-    status: 'Saved',
-    note: 'Local conversion profile passed latency and tone checks.',
-    timestamp: '6:18 PM',
-  },
-  {
-    id: 's3',
-    title: 'Provider mismatch',
-    status: 'Blocked',
-    note: 'API credentials unavailable; local preview remained active.',
-    timestamp: '4:04 PM',
-  },
-]
-
-const navItems: { id: ScreenName; label: string; icon: typeof Sparkles }[] = [
+const NAV_ITEMS: { id: ScreenName; label: string; icon: typeof Sparkles }[] = [
   { id: 'studio', label: 'Studio', icon: Sparkles },
-  { id: 'identity', label: 'Identity Library', icon: UserRound },
-  { id: 'voice', label: 'Voice Library', icon: Volume2 },
-  { id: 'devices', label: 'Camera & Audio', icon: Camera },
-  { id: 'history', label: 'Session History', icon: Activity },
+  { id: 'identity', label: 'Character', icon: ImagePlus },
+  { id: 'devices', label: 'Devices', icon: Camera },
+  { id: 'history', label: 'Sessions', icon: Clock3 },
   { id: 'settings', label: 'Settings', icon: Settings2 },
-  { id: 'diagnostics', label: 'Diagnostics', icon: Cpu },
-  { id: 'about', label: 'About', icon: ShieldCheck },
+  { id: 'diagnostics', label: 'Diagnostics', icon: Activity },
 ]
+
+const emptyHistory: HistoryRecord[] = []
+
+function formatClock(date = new Date()) {
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : 'An unexpected error occurred.'
+}
+
+function parseSettings(value: string): AppSettings {
+  const parsed = JSON.parse(value) as Partial<AppSettings>
+  return {
+    enablePromptExpansion: typeof parsed.enablePromptExpansion === 'boolean'
+      ? parsed.enablePromptExpansion
+      : DEFAULT_SETTINGS.enablePromptExpansion,
+    autoRefreshDevices: typeof parsed.autoRefreshDevices === 'boolean'
+      ? parsed.autoRefreshDevices
+      : DEFAULT_SETTINGS.autoRefreshDevices,
+  }
+}
 
 function App() {
   const [activeScreen, setActiveScreen] = useState<ScreenName>('studio')
-  const [settings, setSettings] = useState<AppSettings>(defaultSettings)
-  const [sessionHistory, setSessionHistory] = useState<SessionRecord[]>(defaultSessionHistory)
-  const [characterOptions, setCharacterOptions] = useState<CharacterOption[]>(defaultCharacterOptions)
-  const [mainCharacterId, setMainCharacterId] = useState(defaultCharacterOptions[0].id)
-  const [targetCharacterId, setTargetCharacterId] = useState(defaultCharacterOptions[0].id)
-  const [voiceOptions, setVoiceOptions] = useState<VoiceOption[]>(defaultVoiceOptions)
-  const [selectedVoiceId, setSelectedVoiceId] = useState(defaultVoiceOptions[0].id)
-  const [voiceAudioUrl, setVoiceAudioUrl] = useState<string | null>(null)
-  const [voiceAudioName, setVoiceAudioName] = useState('studio-sample-a.mp3')
-  const [cameraDevices, setCameraDevices] = useState<DeviceOption[]>([])
-  const [micDevices, setMicDevices] = useState<DeviceOption[]>([])
-  const [selectedCamera, setSelectedCamera] = useState('')
-  const [selectedMic, setSelectedMic] = useState('')
-  const [streamError, setStreamError] = useState<string | null>(null)
-  const [cameraReady, setCameraReady] = useState(false)
-  const [studioLive, setStudioLive] = useState(false)
-  const [savedAt, setSavedAt] = useState('Not yet saved')
-  const [permissionState, setPermissionState] = useState<'pending' | 'granted' | 'blocked'>('pending')
-  const [liveVoiceError, setLiveVoiceError] = useState<string | null>(null)
-  const [outputWarning, setOutputWarning] = useState<string | null>(null)
-  const videoRef = useRef<HTMLVideoElement | null>(null)
-  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const [prompt, setPrompt] = useState(DEFAULT_PROMPT)
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS)
+  const [references, setReferences] = useState<ReferenceImage[]>([])
+  const [selectedReferenceId, setSelectedReferenceId] = useState('')
+  const [cameraDevices, setCameraDevices] = useState<MediaDeviceOption[]>([])
+  const [microphoneDevices, setMicrophoneDevices] = useState<MediaDeviceOption[]>([])
+  const [selectedCameraId, setSelectedCameraId] = useState('')
+  const [selectedMicrophoneId, setSelectedMicrophoneId] = useState('')
+  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null)
+  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null)
+  const [sessionState, setSessionState] = useState<SessionState>('disconnected')
+  const [apiState, setApiState] = useState<ApiState>('unchecked')
+  const [permissionStatus, setPermissionStatus] = useState<'not-requested' | 'granted' | 'blocked'>('not-requested')
+  const [error, setError] = useState<string | null>(null)
+  const [settingsError, setSettingsError] = useState<string | null>(null)
+  const [history, setHistory] = useState<HistoryRecord[]>(emptyHistory)
+  const [busy, setBusy] = useState(false)
+  const [referenceError, setReferenceError] = useState<string | null>(null)
+  const [settingsLoaded, setSettingsLoaded] = useState(false)
+
   const cameraStreamRef = useRef<MediaStream | null>(null)
+  const sessionRef = useRef<LucySession | null>(null)
+  const imageInputRef = useRef<HTMLInputElement | null>(null)
 
-  const selectedMainCharacter = useMemo(
-    () => characterOptions.find((character) => character.id === mainCharacterId) ?? characterOptions[0],
-    [characterOptions, mainCharacterId],
+  const selectedReference = useMemo(
+    () => references.find((image) => image.id === selectedReferenceId) ?? null,
+    [references, selectedReferenceId],
   )
-  const selectedTargetCharacter = useMemo(
-    () => characterOptions.find((character) => character.id === targetCharacterId) ?? characterOptions[0],
-    [characterOptions, targetCharacterId],
-  )
-  const selectedVoice = useMemo(
-    () => voiceOptions.find((voice) => voice.id === selectedVoiceId) ?? voiceOptions[0],
-    [selectedVoiceId, voiceOptions],
-  )
+  const isSessionActive = sessionState === 'requesting' || sessionState === 'connecting' ||
+    sessionState === 'connected' || sessionState === 'live'
+  const hasValidInputs = Boolean(cameraStream?.getVideoTracks().length) &&
+    Boolean(selectedReference) && Boolean(prompt.trim())
 
-  const hasNamiFusionKey = Boolean(settings.namifusionApiKey.trim())
-  const liveVoiceConversionSupported = hasNamiFusionKey && settings.nfcEnabled
-  const virtualCameraTested = false
+  const attachCameraVideo = useCallback((video: HTMLVideoElement | null) => {
+    if (!video || !cameraStream) return
+    video.srcObject = cameraStream
+    void video.play().catch((playError: unknown) => {
+      setError(`Camera preview could not start: ${errorMessage(playError)}`)
+    })
+  }, [cameraStream])
 
-  const isSessionReady = useMemo(() => {
-    return Boolean(selectedMainCharacter) && Boolean(selectedTargetCharacter) && Boolean(selectedCamera) && Boolean(selectedMic) && Boolean(selectedVoice) && !streamError
-  }, [selectedCamera, selectedMainCharacter, selectedMic, selectedTargetCharacter, selectedVoice, streamError])
+  const attachOutputVideo = useCallback((video: HTMLVideoElement | null) => {
+    if (!video || !remoteStream) return
+    video.srcObject = remoteStream
+    void video.play().catch((playError: unknown) => {
+      setError(`Transformed video playback failed: ${errorMessage(playError)}`)
+    })
+  }, [remoteStream])
 
-  useEffect(() => {
-    void loadSettings()
-    void refreshMediaDevices()
-
-    const storedHistory = localStorage.getItem('myaiswap-session-history')
-    if (storedHistory) {
-      setSessionHistory(JSON.parse(storedHistory) as SessionRecord[])
-    }
-  }, [])
-
-  useEffect(() => {
-    if (!selectedCamera) {
-      return
-    }
-    void startCameraPreview()
-
-    return () => {
-      stopCameraPreview()
-    }
-  }, [selectedCamera])
-
-  const saveSettings = async (nextSettings: AppSettings) => {
-    try {
-      await invoke('save_app_settings', { settings: JSON.stringify(nextSettings) })
-      setSavedAt(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))
-    } catch {
-      localStorage.setItem('myaiswap-settings', JSON.stringify(nextSettings))
-      setSavedAt(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))
-    }
-  }
-
-  const loadSettings = async () => {
-    try {
-      const stored = await invoke<string>('load_app_settings')
-      if (stored) {
-        const parsed = JSON.parse(stored) as Partial<AppSettings>
-        const merged = { ...defaultSettings, ...parsed }
-        setSettings(merged)
-      }
-    } catch {
-      const stored = localStorage.getItem('myaiswap-settings')
-      if (stored) {
-        const parsed = JSON.parse(stored) as Partial<AppSettings>
-        setSettings({ ...defaultSettings, ...parsed })
-      }
-    }
-  }
-
-  const updateSettings = async (nextSettings: AppSettings) => {
-    setSettings(nextSettings)
-    await saveSettings(nextSettings)
-  }
-
-  const applyOutputWarnings = (mode: AppSettings['outputMode']) => {
-    if (mode === 'virtual-camera') {
-      setOutputWarning('Virtual camera output is not verified on this machine yet. Use speaker audio until a native virtual-camera module is installed and tested on this OS.')
-      return
-    }
-
-    setOutputWarning(null)
-  }
-
-  const handleMainCharacterUpload = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    if (!file) return
-
-    const reader = new FileReader()
-    reader.onload = () => {
-      const nextImage = String(reader.result)
-      const nextCharacter: CharacterOption = {
-        id: `main-${Date.now()}`,
-        name: file.name.replace(/\.[^.]+$/, '') || 'Custom main character',
-        source: 'Uploaded source face',
-        preview: nextImage,
-        kind: 'upload',
-      }
-
-      setCharacterOptions((previous) => [nextCharacter, ...previous])
-      setMainCharacterId(nextCharacter.id)
-      setStreamError(null)
-    }
-    reader.readAsDataURL(file)
-  }
-
-  const handleTargetCharacterUpload = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    if (!file) return
-
-    const reader = new FileReader()
-    reader.onload = () => {
-      const nextImage = String(reader.result)
-      const nextCharacter: CharacterOption = {
-        id: `target-${Date.now()}`,
-        name: file.name.replace(/\.[^.]+$/, '') || 'Custom target character',
-        source: 'Uploaded target face',
-        preview: nextImage,
-        kind: 'upload',
-      }
-
-      setCharacterOptions((previous) => [nextCharacter, ...previous])
-      setTargetCharacterId(nextCharacter.id)
-    }
-    reader.readAsDataURL(file)
-  }
-
-  const handleVoiceUpload = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    if (!file) return
-
-    if (!file.type.startsWith('audio/')) {
-      setLiveVoiceError('Voice uploads must be audio files such as .mp3 or .wav.')
-      return
-    }
-
-    const url = URL.createObjectURL(file)
-    const nextVoice: VoiceOption = {
-      id: `voice-upload-${Date.now()}`,
-      name: file.name,
-      source: 'Uploaded voice',
-      kind: 'upload',
-      provider: 'User audio',
-      duration: 'Custom',
-    }
-
-    setVoiceOptions((previous) => [nextVoice, ...previous])
-    setSelectedVoiceId(nextVoice.id)
-    setVoiceAudioUrl(url)
-    setVoiceAudioName(file.name)
-    setLiveVoiceError(null)
-  }
-
-  const requestMediaPermission = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true,
-      })
-
-      stream.getTracks().forEach((track) => track.stop())
-      setPermissionState('granted')
-      setStreamError(null)
-      await refreshMediaDevices()
-    } catch (error) {
-      setPermissionState('blocked')
-      setStreamError(
-        error instanceof Error ? error.message : 'Camera and microphone access is blocked. Grant permissions from the operating system and retry.',
-      )
-    }
-  }
-
-  const refreshMediaDevices = async () => {
-    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
-      setStreamError('This environment does not expose media-device enumeration. Camera access may still work in a Tauri desktop session.')
+  const refreshMediaDevices = useCallback(async () => {
+    if (!navigator.mediaDevices?.enumerateDevices) {
+      setError('This desktop webview does not expose media-device enumeration.')
       return
     }
 
     try {
       const devices = await navigator.mediaDevices.enumerateDevices()
-      const video = devices
+      const cameras = devices
         .filter((device) => device.kind === 'videoinput')
-        .map((device) => ({ id: device.deviceId, label: device.label || 'Camera', kind: 'videoinput' as const }))
-      const audio = devices
+        .map((device) => ({ id: device.deviceId, label: device.label || 'Camera' }))
+      const microphones = devices
         .filter((device) => device.kind === 'audioinput')
-        .map((device) => ({ id: device.deviceId, label: device.label || 'Microphone', kind: 'audioinput' as const }))
+        .map((device) => ({ id: device.deviceId, label: device.label || 'Microphone' }))
 
-      setCameraDevices(video)
-      setMicDevices(audio)
-
-      if (video.length > 0 && !selectedCamera) {
-        setSelectedCamera(video[0].id)
-      }
-      if (audio.length > 0 && !selectedMic) {
-        setSelectedMic(audio[0].id)
-      }
-    } catch (error) {
-      setStreamError(error instanceof Error ? error.message : 'Unable to enumerate media devices.')
+      setCameraDevices(cameras)
+      setMicrophoneDevices(microphones)
+      setSelectedCameraId((current) => current || cameras[0]?.id || '')
+      setSelectedMicrophoneId((current) => current || microphones[0]?.id || '')
+    } catch (deviceError) {
+      setError(`Unable to enumerate camera and microphone devices: ${errorMessage(deviceError)}`)
     }
-  }
+  }, [])
 
-  const stopCameraPreview = () => {
-    if (cameraStreamRef.current) {
-      cameraStreamRef.current.getTracks().forEach((track) => track.stop())
-      cameraStreamRef.current = null
+  const startCameraPreview = useCallback(async (deviceId: string) => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError('This desktop webview does not support camera capture.')
+      return
     }
-
-    if (videoRef.current) {
-      videoRef.current.srcObject = null
-    }
-
-    setCameraReady(false)
-  }
-
-  const startCameraPreview = async () => {
-    if (!selectedCamera) return
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { deviceId: { exact: selectedCamera } },
+        video: deviceId ? { deviceId: { exact: deviceId } } : true,
         audio: false,
       })
-
-      stopCameraPreview()
+      cameraStreamRef.current?.getTracks().forEach((track) => track.stop())
       cameraStreamRef.current = stream
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream
-        void videoRef.current.play().catch(() => undefined)
+      setCameraStream(stream)
+      setError(null)
+      if (settings.autoRefreshDevices) await refreshMediaDevices()
+    } catch (cameraError) {
+      setCameraStream(null)
+      setError(`Unable to open the selected camera: ${errorMessage(cameraError)}`)
+    }
+  }, [refreshMediaDevices, settings.autoRefreshDevices])
+
+  useEffect(() => {
+    let cancelled = false
+    const loadStoredState = async () => {
+      try {
+        if (isTauri()) {
+          const stored = await invoke<string>('load_app_settings')
+          if (!cancelled && stored) {
+            setSettings(parseSettings(stored))
+          }
+        } else {
+          const stored = localStorage.getItem('myaiswap-settings')
+          if (!cancelled && stored) {
+            setSettings(parseSettings(stored))
+          }
+        }
+
+        const storedHistory = localStorage.getItem('myaiswap-session-history')
+        if (!cancelled && storedHistory) {
+          setHistory(JSON.parse(storedHistory) as HistoryRecord[])
+        }
+      } catch (loadError) {
+        if (!cancelled) {
+          setSettingsError(`Unable to load saved studio settings: ${errorMessage(loadError)}`)
+        }
+      } finally {
+        if (!cancelled) setSettingsLoaded(true)
       }
-      setCameraReady(true)
-      setStreamError(null)
-    } catch (error) {
-      setCameraReady(false)
-      setStreamError(
-        error instanceof Error ? error.message : 'The selected camera is unavailable or blocked by a permission policy.',
-      )
+    }
+
+    void loadStoredState()
+    // Device enumeration is asynchronous synchronization with the browser media API.
+    // oxlint-disable-next-line react/set-state-in-effect
+    void refreshMediaDevices()
+    return () => {
+      cancelled = true
+    }
+  }, [refreshMediaDevices])
+
+  useEffect(() => {
+    if (!selectedCameraId || isSessionActive) return
+    // Camera acquisition synchronizes the selected device with the desktop media API.
+    // oxlint-disable-next-line react/set-state-in-effect
+    void startCameraPreview(selectedCameraId)
+  }, [selectedCameraId, startCameraPreview, isSessionActive])
+
+  useEffect(() => {
+    if (!settingsLoaded) return
+    const persistSettings = async () => {
+      try {
+        if (isTauri()) {
+          await invoke('save_app_settings', { settings: JSON.stringify(settings) })
+        } else {
+          localStorage.setItem('myaiswap-settings', JSON.stringify(settings))
+        }
+        setSettingsError(null)
+      } catch (saveError) {
+        setSettingsError(`Unable to save studio settings: ${errorMessage(saveError)}`)
+      }
+    }
+    void persistSettings()
+  }, [settings, settingsLoaded])
+
+  const requestMediaPermissions = async () => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setPermissionStatus('blocked')
+      setError('This desktop webview does not support camera and microphone permissions.')
+      return
+    }
+
+    try {
+      const temporaryStream = await navigator.mediaDevices.getUserMedia({
+        video: selectedCameraId ? { deviceId: { exact: selectedCameraId } } : true,
+        audio: selectedMicrophoneId ? { deviceId: { exact: selectedMicrophoneId } } : true,
+      })
+      temporaryStream.getTracks().forEach((track) => track.stop())
+      setPermissionStatus('granted')
+      setError(null)
+      await refreshMediaDevices()
+      if (selectedCameraId) await startCameraPreview(selectedCameraId)
+    } catch (permissionError) {
+      setPermissionStatus('blocked')
+      setError(`Camera or microphone permission was denied: ${errorMessage(permissionError)}`)
     }
   }
 
-  const handleStudioToggle = async () => {
-    const nextValue = !studioLive
-    const voiceReady = Boolean(selectedVoice) && Boolean(selectedMic)
+  const stopCameraPreview = useCallback(() => {
+    cameraStreamRef.current?.getTracks().forEach((track) => track.stop())
+    cameraStreamRef.current = null
+    setCameraStream(null)
+  }, [])
 
-    if (nextValue && !hasNamiFusionKey) {
-      setLiveVoiceError('NamiFusion realtime face swap requires an API key before live streaming is allowed.')
-      return
-    }
-
-    if (nextValue && !liveVoiceConversionSupported) {
-      setLiveVoiceError('Live voice conversion is not supported without a valid NamiFusion runtime and provider credentials.')
-      return
-    }
-
-    if (nextValue && !voiceReady) {
-      setLiveVoiceError('Choose a live microphone and voice source before starting the session.')
-      return
-    }
-
-    if (nextValue && settings.outputMode === 'virtual-camera' && !virtualCameraTested) {
-      setLiveVoiceError('The selected virtual camera output has not been tested on this OS. Choose speaker output until the native virtual-camera path is validated.')
-      return
-    }
-
-    setStudioLive(nextValue)
-    setLiveVoiceError(null)
-
-    if (nextValue && audioRef.current) {
-      const audioSource = voiceAudioUrl ?? selectedVoice.source
-      audioRef.current.src = audioSource
-      audioRef.current.volume = 1
-      void audioRef.current.play().catch(() => {
-        setLiveVoiceError('The selected voice input is ready, but browser autoplay blocked the live audio start. Click the preview button again to allow sound playback.')
-      })
-    }
-
-    setSessionHistory((previous) => {
-      const newEntry: SessionRecord = {
-        id: `${Date.now()}`,
-        title: nextValue ? 'Live face swap started' : 'Live face swap stopped',
-        status: nextValue ? 'Ready' : 'Saved',
-        note: nextValue
-          ? `Main character ${selectedMainCharacter.name} is driving the live swap to ${selectedTargetCharacter.name}. Voice route: ${selectedVoice.name}.`
-          : 'Live session ended and local state was saved.',
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+  const addHistory = (record: HistoryRecord) => {
+    setHistory((previous) => {
+      const next = [record, ...previous].slice(0, 50)
+      try {
+        localStorage.setItem('myaiswap-session-history', JSON.stringify(next))
+      } catch (storageError) {
+        setError(`Unable to save session history: ${errorMessage(storageError)}`)
       }
-
-      const next = [newEntry, ...previous]
-      localStorage.setItem('myaiswap-session-history', JSON.stringify(next))
       return next
     })
+  }
 
-    if (!nextValue && audioRef.current) {
-      audioRef.current.pause()
-      audioRef.current.currentTime = 0
+  const recordSessionEvent = (title: string, detail: string, status: HistoryRecord['status']) => {
+    addHistory({
+      id: crypto.randomUUID(),
+      title,
+      detail,
+      status,
+      createdAt: formatClock(),
+    })
+  }
+
+  const buildInput = (): LucyInput => {
+    if (!selectedReference) throw new Error('Select a valid character reference image first.')
+    if (!prompt.trim()) throw new Error('Write a prompt describing the desired transformation.')
+    return {
+      prompt: prompt.trim(),
+      reference_image_url: selectedReference.dataUrl,
+      enable_prompt_expansion: settings.enablePromptExpansion,
     }
   }
 
-  const renderStudio = () => (
-    <div className="studio-grid">
-      <section className="panel panel-large">
-        <div className="panel-header">
-          <div>
-            <p className="eyebrow">Live studio</p>
-            <h2>Real-time face swap and audio routing</h2>
-          </div>
-          <span className={`status-pill ${studioLive ? 'status-on' : 'status-idle'}`}>
-            {studioLive ? 'Studio live' : 'Awaiting session'}
-          </span>
+  const tokenProvider: TokenProvider = useCallback(async (app) => {
+    if (app !== ENDPOINT) {
+      throw new Error('The app requested a token for an unexpected fal endpoint.')
+    }
+    setApiState('requesting')
+    try {
+      const token = await invoke<string>('create_fal_realtime_token')
+      setApiState('token-issued')
+      return token
+    } catch (tokenError) {
+      setApiState('error')
+      throw new Error(errorMessage(tokenError))
+    }
+  }, [])
+
+  const connectSession = async () => {
+    if (isSessionActive) return
+    setError(null)
+    setBusy(true)
+
+    try {
+      if (!cameraStreamRef.current?.getVideoTracks().length) {
+        throw new Error('Select a camera and wait for its local preview before connecting.')
+      }
+      const input = buildInput()
+      setSessionState('requesting')
+      const session = await connectLucy({
+        localStream: cameraStreamRef.current,
+        input,
+        tokenProvider,
+        onRemoteStream: (stream) => {
+          setRemoteStream(stream)
+          setSessionState('live')
+          setApiState('connected')
+        },
+        onStateChange: (state) => {
+          if (state === 'connected') {
+            setSessionState('connected')
+            setApiState('connected')
+          } else if (state === 'connecting' || state === 'negotiating') {
+            setSessionState('connecting')
+          } else if (state === 'failed') {
+            setSessionState('error')
+          } else if (state === 'closed' && sessionRef.current) {
+            sessionRef.current = null
+            setSessionState('disconnected')
+          }
+        },
+        onError: (sessionError) => {
+          setSessionState('error')
+          setApiState('error')
+          setError(sessionError.message)
+          setRemoteStream(null)
+          sessionRef.current = null
+          recordSessionEvent('Connection failed', sessionError.message, 'Failed')
+        },
+      })
+
+      sessionRef.current = session
+      setSessionState((current) => current === 'live' ? current : 'connected')
+      setApiState('connected')
+      recordSessionEvent('Lucy session connected', `Connected to ${LUCY_ENDPOINT}.`, 'Connected')
+    } catch (connectError) {
+      setSessionState('error')
+      setApiState('error')
+      setError(errorMessage(connectError))
+      recordSessionEvent('Connection failed', errorMessage(connectError), 'Failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const startSession = () => {
+    try {
+      const session = sessionRef.current
+      if (!session) throw new Error('Connect to Lucy before starting the session.')
+      session.send(buildInput())
+      setError(null)
+      if (remoteStream) setSessionState('live')
+      recordSessionEvent('Transformation inputs sent', `Updated prompt and reference for ${LUCY_ENDPOINT}.`, 'Connected')
+    } catch (startError) {
+      setError(errorMessage(startError))
+    }
+  }
+
+  const stopSession = (disconnectCamera = false) => {
+    sessionRef.current?.close()
+    sessionRef.current = null
+    setRemoteStream(null)
+    setSessionState('disconnected')
+    setApiState('unchecked')
+    if (disconnectCamera) stopCameraPreview()
+    recordSessionEvent(
+      disconnectCamera ? 'Session disconnected' : 'Transformation stopped',
+      disconnectCamera ? 'Realtime connection and local camera preview stopped.' : 'Realtime connection closed; local camera preview remains active.',
+      'Stopped',
+    )
+  }
+
+  const handleReferenceUpload = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    setReferenceError(null)
+
+    if (!IMAGE_TYPES.has(file.type)) {
+      setReferenceError('Choose a PNG, JPEG, or WebP reference image.')
+      return
+    }
+
+    try {
+      const bitmap = await createImageBitmap(file)
+      const { width, height } = bitmap
+      bitmap.close()
+      if (width < MINIMUM_REFERENCE_DIMENSION || height < MINIMUM_REFERENCE_DIMENSION) {
+        setReferenceError(`Reference images must be at least ${MINIMUM_REFERENCE_DIMENSION} × ${MINIMUM_REFERENCE_DIMENSION} pixels. This image is ${width} × ${height}.`)
+        return
+      }
+
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onerror = () => reject(new Error('Unable to read the selected image file.'))
+        reader.onload = () => {
+          if (typeof reader.result === 'string') resolve(reader.result)
+          else reject(new Error('The selected image could not be encoded.'))
+        }
+        reader.readAsDataURL(file)
+      })
+      const reference: ReferenceImage = {
+        id: crypto.randomUUID(),
+        name: file.name,
+        dataUrl,
+        width,
+        height,
+      }
+      setReferences((previous) => [reference, ...previous])
+      setSelectedReferenceId(reference.id)
+    } catch (imageError) {
+      setReferenceError(`Unable to validate the reference image: ${errorMessage(imageError)}`)
+    }
+  }
+
+  const currentScreenLabel = NAV_ITEMS.find((item) => item.id === activeScreen)?.label ?? 'Studio'
+  const statusLabel: Record<SessionState, string> = {
+    disconnected: 'Disconnected',
+    requesting: 'Requesting token',
+    connecting: 'Connecting',
+    connected: 'Connected',
+    live: 'Live stream',
+    error: 'Connection error',
+  }
+  const statusClass = sessionState === 'live' ? 'is-live'
+    : sessionState === 'error' ? 'is-error'
+      : isSessionActive ? 'is-connecting' : 'is-idle'
+
+  const renderReferencePicker = (compact = false) => (
+    <div className={`reference-picker ${compact ? 'reference-picker-compact' : ''}`}>
+      <div className="reference-heading">
+        <div>
+          <span className="field-overline">Character reference</span>
+          <strong>{selectedReference?.name ?? 'No image selected'}</strong>
         </div>
-
-        <div className="studio-preview">
-          <div className="preview-window">
-            {selectedMainCharacter ? (
-              <img src={selectedMainCharacter.preview} alt="Selected main character" className="identity-image" />
-            ) : (
-              <div className="empty-state large">
-                <ImageUp size={38} />
-                <span>No main character selected</span>
-              </div>
-            )}
-          </div>
-
-          <div className="preview-window">
-            {cameraReady ? (
-              <video ref={videoRef} autoPlay playsInline muted className="camera-video" />
-            ) : (
-              <div className="empty-state large">
-                <Camera size={38} />
-                <span>Camera preview unavailable</span>
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div className="meta-row">
-          <div className="meta-item">
-            <span className="meta-label">Main character</span>
-            <strong>{selectedMainCharacter?.name ?? 'Select a source face'}</strong>
-          </div>
-          <div className="meta-item">
-            <span className="meta-label">Target character</span>
-            <strong>{selectedTargetCharacter?.name ?? 'Select viewer target'}</strong>
-          </div>
-          <div className="meta-item">
-            <span className="meta-label">Output</span>
-            <strong>{settings.outputMode === 'virtual-camera' ? 'Virtual camera target' : 'Speaker audio'}</strong>
-          </div>
-        </div>
-
-        <div className="preview-controls">
-          <button type="button" className="secondary-button" onClick={() => setActiveScreen('identity')}>
-            Choose characters
-          </button>
-          <button type="button" className="secondary-button" onClick={() => setActiveScreen('voice')}>
-            Choose voice
-          </button>
-          <button type="button" className="secondary-button" onClick={() => void refreshMediaDevices()}>
-            Refresh preview
-          </button>
-        </div>
-
-      </section>
-
-      <aside className="panel panel-side">
-        <div className="panel-header compact">
-          <div>
-            <p className="eyebrow">Session readiness</p>
-            <h3>Checklist</h3>
-          </div>
-        </div>
-
-        <ul className="checklist">
-          <li className={Boolean(selectedMainCharacter) ? 'ok' : ''}>
-            <CheckCircle2 size={16} />
-            <span>Main character selected</span>
-          </li>
-          <li className={Boolean(selectedTargetCharacter) ? 'ok' : ''}>
-            <CheckCircle2 size={16} />
-            <span>Target character selected</span>
-          </li>
-          <li className={cameraReady ? 'ok' : ''}>
-            <CheckCircle2 size={16} />
-            <span>Camera preview active</span>
-          </li>
-          <li className={Boolean(selectedMic) ? 'ok' : ''}>
-            <CheckCircle2 size={16} />
-            <span>Microphone selected</span>
-          </li>
-          <li className={Boolean(selectedVoice) ? 'ok' : ''}>
-            <CheckCircle2 size={16} />
-            <span>Voice source configured</span>
-          </li>
-        </ul>
-
-        <div className="provider-box">
-          <p className="eyebrow">NamiFusion status</p>
-          <p>
-            {!hasNamiFusionKey
-              ? 'NamiFusion key required. The public docs expose API-key access, but no public realtime streaming contract was available for this implementation, so live face swap remains gated until your provider credentials are validated.'
-              : settings.nfcEnabled
-                ? 'NamiFusion credentials are present; live face-swap readiness depends on network connectivity, native output support, and a working provider session.'
-                : 'NamiFusion route is disabled in settings.'}
-          </p>
-        </div>
-
-        {liveVoiceError ? (
-          <div className="error-box">
-            <CircleAlert size={16} />
-            <span>{liveVoiceError}</span>
-          </div>
-        ) : null}
-
-        {outputWarning ? (
-          <div className="error-box">
-            <CircleAlert size={16} />
-            <span>{outputWarning}</span>
-          </div>
-        ) : null}
-
         <button
           type="button"
-          className="primary-button full-width"
-          disabled={!isSessionReady}
-          onClick={handleStudioToggle}
+          className="icon-button"
+          onClick={() => imageInputRef.current?.click()}
+          aria-label="Upload character reference image"
+          title="Upload reference"
         >
-          {studioLive ? 'Stop live face swap' : 'Start live face swap'}
+          <Plus size={17} />
         </button>
-      </aside>
+        <input
+          ref={imageInputRef}
+          className="visually-hidden"
+          type="file"
+          accept="image/png,image/jpeg,image/webp"
+          onChange={(event) => void handleReferenceUpload(event)}
+        />
+      </div>
+      {references.length > 0 ? (
+        <label className="select-wrap">
+          <select value={selectedReferenceId} onChange={(event) => setSelectedReferenceId(event.target.value)}>
+            {references.map((reference) => (
+              <option key={reference.id} value={reference.id}>
+                {reference.name} · {reference.width} × {reference.height}
+              </option>
+            ))}
+          </select>
+          <ChevronDown size={15} />
+        </label>
+      ) : null}
+      <button
+        type="button"
+        className={`reference-dropzone ${selectedReference ? 'has-image' : ''}`}
+        onClick={() => imageInputRef.current?.click()}
+      >
+        {selectedReference ? (
+          <>
+            <img src={selectedReference.dataUrl} alt={`Character reference: ${selectedReference.name}`} />
+            <span className="reference-size">{selectedReference.width} × {selectedReference.height}</span>
+          </>
+        ) : (
+          <>
+            <span className="upload-symbol"><ArrowDownToLine size={19} /></span>
+            <strong>Upload a character image</strong>
+            <small>PNG, JPEG or WebP · minimum 512 × 512</small>
+          </>
+        )}
+      </button>
+      {referenceError ? <p className="inline-error">{referenceError}</p> : null}
+      {selectedReference ? (
+        <p className="field-hint">Lucy uses the reference for character swap or virtual try-on.</p>
+      ) : null}
+    </div>
+  )
+
+  const renderStudio = () => (
+    <div className="studio-page">
+      <section className="studio-intro">
+        <div>
+          <p className="eyebrow">Realtime video workspace</p>
+          <h1>Make the moment <span>yours.</span></h1>
+          <p className="intro-copy">Transform your live camera with a character reference and a prompt. The output below is the remote Lucy stream.</p>
+        </div>
+        <div className="intro-endpoint">
+          <span className="endpoint-dot" />
+          <div><small>MODEL ENDPOINT</small><strong>{LUCY_ENDPOINT}</strong></div>
+          <ArrowUpRight size={15} />
+        </div>
+      </section>
+
+      <div className="studio-layout">
+        <section className="preview-panel">
+          <div className="preview-panel-head">
+            <div>
+              <span className="field-overline">Session preview</span>
+              <h2>Live transformation</h2>
+            </div>
+            <span className={`connection-badge ${statusClass}`}>
+              <span className="status-dot" />
+              {statusLabel[sessionState]}
+            </span>
+          </div>
+
+          <div className="preview-stage">
+            <div className="video-tile">
+              <div className="tile-label"><span className="tile-dot source-dot" /> SOURCE <span>LOCAL</span></div>
+              {cameraStream ? (
+                <video ref={attachCameraVideo} autoPlay playsInline muted aria-label="Local camera preview" />
+              ) : (
+                <div className="video-placeholder">
+                  <Camera size={24} />
+                  <strong>Camera preview</strong>
+                  <span>Select a device or grant camera access.</span>
+                  <button type="button" className="text-button" onClick={() => void requestMediaPermissions()}>Enable camera</button>
+                </div>
+              )}
+              {cameraStream ? <span className="video-caption">{cameraDevices.find((device) => device.id === selectedCameraId)?.label ?? 'Camera'}</span> : null}
+            </div>
+
+            <div className="video-tile output-tile">
+              <div className="tile-label"><span className={`tile-dot ${remoteStream ? 'output-dot' : 'waiting-dot'}`} /> TRANSFORMED <span>FAL.AI</span></div>
+              {remoteStream ? (
+                <video ref={attachOutputVideo} autoPlay playsInline aria-label="Remote transformed video stream" />
+              ) : (
+                <div className="video-placeholder output-placeholder">
+                  {sessionState === 'connecting' || sessionState === 'requesting' ? (
+                    <>
+                      <LoaderCircle className="spin" size={24} />
+                      <strong>Negotiating WebRTC</strong>
+                      <span>Waiting for remote transformed media.</span>
+                    </>
+                  ) : sessionState === 'error' ? (
+                    <>
+                      <AlertCircle size={24} />
+                      <strong>Output unavailable</strong>
+                      <span>Review the connection error below, then retry.</span>
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles size={24} />
+                      <strong>Your transformed stream appears here</strong>
+                      <span>Connect to Lucy to begin processing live video.</span>
+                    </>
+                  )}
+                </div>
+              )}
+              {remoteStream ? <span className="video-caption">Remote Lucy output</span> : null}
+            </div>
+          </div>
+
+          <div className="preview-footer">
+            <div className="preview-legend">
+              <span><i className="legend-source" /> Local camera</span>
+              <span><i className="legend-output" /> Remote transformed stream</span>
+            </div>
+            <span className="privacy-label"><ShieldCheck size={14} /> No local output substitution</span>
+          </div>
+
+          {error ? (
+            <div className="error-banner" role="alert">
+              <AlertCircle size={17} />
+              <span>{error}</span>
+              <button type="button" className="icon-button" onClick={() => setError(null)} aria-label="Dismiss error"><X size={16} /></button>
+            </div>
+          ) : null}
+
+          <div className="session-controls">
+            <div className="control-copy">
+              <span className="field-overline">Realtime session</span>
+              <small>Connect sends the current prompt and reference as Lucy's first model input.</small>
+            </div>
+            <div className="control-buttons">
+              <button
+                type="button"
+                className="button-secondary"
+                onClick={() => void connectSession()}
+                disabled={busy || isSessionActive || !hasValidInputs}
+              >
+                {busy ? <LoaderCircle size={16} className="spin" /> : <Wifi size={16} />}
+                Connect
+              </button>
+              <button
+                type="button"
+                className="button-primary"
+                onClick={startSession}
+                disabled={sessionState !== 'connected' && sessionState !== 'live'}
+              >
+                <Play size={15} fill="currentColor" />
+                Start
+              </button>
+              <button
+                type="button"
+                className="button-muted"
+                onClick={() => stopSession(false)}
+                disabled={!isSessionActive}
+              >
+                <Square size={14} fill="currentColor" />
+                Stop
+              </button>
+              <button
+                type="button"
+                className="button-muted"
+                onClick={() => stopSession(true)}
+                disabled={!isSessionActive && !cameraStream}
+              >
+                Disconnect
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <aside className="control-panel">
+          <div className="control-panel-heading">
+            <div>
+              <span className="field-overline">Scene controls</span>
+              <h2>Build your look</h2>
+            </div>
+            <SlidersHorizontal size={18} />
+          </div>
+          {renderReferencePicker(true)}
+          <label className="prompt-field">
+            <span className="field-overline">Transformation prompt</span>
+            <textarea
+              value={prompt}
+              maxLength={2000}
+              onChange={(event) => setPrompt(event.target.value)}
+              placeholder="Describe the character, scene, or visual style you want..."
+              rows={5}
+            />
+            <span className="prompt-count">{prompt.length} / 2000</span>
+          </label>
+          <div className="prompt-tip"><CircleHelp size={15} /><span>Describe the reference image in words. Lucy 2.5 does not support @-mentions.</span></div>
+          {isSessionActive ? (
+            <p className="live-update-note">After editing, press <strong>Start</strong> to send the updated prompt and reference over the realtime connection.</p>
+          ) : null}
+          <button
+            type="button"
+            className="button-primary wide"
+            onClick={startSession}
+            disabled={sessionState !== 'connected' && sessionState !== 'live'}
+          >
+            <Sparkles size={16} />
+            Apply prompt &amp; reference
+          </button>
+          <div className="provider-note">
+            <ShieldCheck size={16} />
+            <span>Provider watermarking and provenance remain intact.</span>
+          </div>
+        </aside>
+      </div>
+
+      <div className="studio-status-row">
+        <div className="status-card">
+          <span className="status-card-icon"><Wifi size={16} /></span>
+          <div><small>FAL API</small><strong>{apiState === 'connected' ? 'Realtime connected' : apiState === 'token-issued' ? 'Short-lived token issued' : apiState === 'requesting' ? 'Requesting token…' : apiState === 'error' ? 'Connection error' : 'Not connected'}</strong></div>
+        </div>
+        <div className="status-card">
+          <span className="status-card-icon"><Camera size={16} /></span>
+          <div><small>CAMERA</small><strong>{cameraStream ? 'Preview active' : 'Not connected'}</strong></div>
+        </div>
+        <div className="status-card">
+          <span className="status-card-icon"><Video size={16} /></span>
+          <div><small>REMOTE OUTPUT</small><strong>{remoteStream ? 'Receiving video' : 'Waiting for transformed media'}</strong></div>
+        </div>
+        <div className="status-card">
+          <span className="status-card-icon"><AudioLines size={16} /></span>
+          <div><small>MICROPHONE</small><strong>{microphoneDevices.find((device) => device.id === selectedMicrophoneId)?.label ?? 'Not selected'}</strong></div>
+        </div>
+      </div>
     </div>
   )
 
   const renderIdentity = () => (
-    <div className="panel">
-      <div className="panel-header">
-        <div>
-          <p className="eyebrow">Character selection</p>
-          <h2>Main and target character workflow</h2>
-        </div>
+    <section className="page-card identity-page">
+      <div className="page-heading">
+        <div><p className="eyebrow">Character reference</p><h1>Choose your identity</h1><p>Upload a reference image or switch between images added in this session.</p></div>
+        <button type="button" className="button-secondary" onClick={() => imageInputRef.current?.click()}><ImagePlus size={17} /> Upload reference</button>
       </div>
-
-      <div className="identity-grid">
-        <div className="stacked-card">
-          <div className="field-label">
-            Main character source face
-            <select value={mainCharacterId} onChange={(event) => setMainCharacterId(event.target.value)}>
-              {characterOptions.map((character) => (
-                <option key={character.id} value={character.id}>
-                  {character.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <label className="secondary-button file-button">
-            <FolderOpen size={16} />
-            <span>Upload main character</span>
-            <input type="file" accept="image/png,image/jpeg,image/webp" onChange={handleMainCharacterUpload} />
-          </label>
-
-          <div className="reference-card small-preview">
-            {selectedMainCharacter ? (
-              <img src={selectedMainCharacter.preview} alt={selectedMainCharacter.name} className="reference-image" />
-            ) : (
-              <div className="empty-state">
-                <ImageUp size={30} />
-                <span>No source face selected</span>
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div className="stacked-card">
-          <div className="field-label">
-            Target viewer character
-            <select value={targetCharacterId} onChange={(event) => setTargetCharacterId(event.target.value)}>
-              {characterOptions.map((character) => (
-                <option key={character.id} value={character.id}>
-                  {character.name}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <label className="secondary-button file-button">
-            <FolderOpen size={16} />
-            <span>Upload target character</span>
-            <input type="file" accept="image/png,image/jpeg,image/webp" onChange={handleTargetCharacterUpload} />
-          </label>
-
-          <div className="reference-card small-preview">
-            {selectedTargetCharacter ? (
-              <img src={selectedTargetCharacter.preview} alt={selectedTargetCharacter.name} className="reference-image" />
-            ) : (
-              <div className="empty-state">
-                <ImageUp size={30} />
-                <span>No target character selected</span>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-
-      <div className="small-note">
-        <ShieldCheck size={16} />
-        <span>The live result follows the selected target character. This does not generate a random face; it uses the explicitly chosen target profile and only becomes active when the provider and native output are ready.</span>
-      </div>
-    </div>
-  )
-
-  const renderVoice = () => (
-    <div className="panel">
-      <div className="panel-header">
-        <div>
-          <p className="eyebrow">Voice control</p>
-          <h2>Voice selection and live audio</h2>
-        </div>
-        <label className="secondary-button file-button">
-          <FolderOpen size={16} />
-          <span>Upload own voice</span>
-          <input type="file" accept="audio/*" onChange={handleVoiceUpload} />
-        </label>
-      </div>
-
-      <div className="voice-grid">
-        {voiceOptions.map((voice) => (
-          <button
-            key={voice.id}
-            type="button"
-            className={`voice-card ${selectedVoiceId === voice.id ? 'selected' : ''}`}
-            onClick={() => {
-              setSelectedVoiceId(voice.id)
-              setVoiceAudioUrl(voice.kind === 'sample' ? voice.source : voiceAudioUrl)
-              setVoiceAudioName(voice.name)
-            }}
-          >
-            <div className="voice-topline">
-              <strong>{voice.name}</strong>
-              <span className={`badge ${voice.kind === 'upload' ? 'neutral' : 'success'}`}>
-                {voice.kind === 'upload' ? 'Upload' : 'Sample'}
-              </span>
-            </div>
-            <p>{voice.provider}</p>
-            <div className="voice-meta">
-              <span>{voice.duration}</span>
-              <span>{voice.kind === 'upload' ? 'Custom' : 'Ready'}</span>
-            </div>
-          </button>
-        ))}
-      </div>
-
-      <div className="stacked-card voice-preview-card">
-        <div className="field-label">
-          Active voice
-          <input type="text" value={voiceAudioName} readOnly />
-        </div>
-
-        <div className="preview-controls compact-controls">
-          <button type="button" className="secondary-button" onClick={() => {
-            if (!audioRef.current) return
-            const src = voiceAudioUrl ?? selectedVoice.source
-            audioRef.current.src = src
-            void audioRef.current.play().catch(() => {
-              setLiveVoiceError('The browser blocked autoplay for the selected voice. Press preview again after user interaction.')
-            })
-          }}>
-            Preview voice
-          </button>
-          <button type="button" className="secondary-button" onClick={() => {
-            if (audioRef.current) {
-              audioRef.current.pause()
-              audioRef.current.currentTime = 0
-            }
-          }}>
-            Stop preview
-          </button>
-        </div>
-
-        {liveVoiceError ? (
-          <div className="error-box">
-            <CircleAlert size={16} />
-            <span>{liveVoiceError}</span>
-          </div>
-        ) : (
-          <div className="success-box">
-            <CheckCircle2 size={16} />
-            <span>{liveVoiceConversionSupported ? 'Live voice is allowed through the selected output route.' : 'Live voice conversion is unavailable until the provider key and native support are validated.'}</span>
-          </div>
-        )}
-      </div>
-    </div>
+      {renderReferencePicker()}
+      <div className="guidance-card"><ShieldCheck size={18} /><span>Lucy accepts PNG, JPEG, and WebP reference images with dimensions of at least 512 × 512 pixels. The image is passed to the model as a reference; it is not used as the output preview.</span></div>
+    </section>
   )
 
   const renderDevices = () => (
-    <div className="panel">
-      <div className="panel-header">
-        <div>
-          <p className="eyebrow">Capture devices</p>
-          <h2>Camera and microphone routing</h2>
-        </div>
-        <button type="button" className="secondary-button" onClick={() => void refreshMediaDevices()}>
-          <RefreshCcw size={16} />
-          Refresh devices
-        </button>
+    <section className="page-card">
+      <div className="page-heading">
+        <div><p className="eyebrow">Capture devices</p><h1>Camera &amp; microphone</h1><p>Select local capture devices and check desktop permission status.</p></div>
+        <button type="button" className="button-secondary" onClick={() => void refreshMediaDevices()}><RefreshCw size={16} /> Refresh devices</button>
       </div>
-
-      <div className="device-grid">
-        <div className="stacked-card">
-          <div className="field-label">
-            Camera device
-            <select value={selectedCamera} onChange={(event) => setSelectedCamera(event.target.value)}>
-              {cameraDevices.length === 0 ? (
-                <option value="">No available cameras</option>
-              ) : (
-                cameraDevices.map((device) => (
-                  <option key={device.id} value={device.id}>
-                    {device.label}
-                  </option>
-                ))
-              )}
+      <div className="device-settings-grid">
+        <div className="settings-block">
+          <label className="field-select">
+            <span><Camera size={16} /> Camera</span>
+            <select value={selectedCameraId} disabled={isSessionActive} onChange={(event) => setSelectedCameraId(event.target.value)}>
+              {cameraDevices.length ? cameraDevices.map((device) => <option key={device.id} value={device.id}>{device.label}</option>) : <option value="">No camera detected</option>}
             </select>
-          </div>
-
-          <div className="field-label">
-            Microphone device
-            <select value={selectedMic} onChange={(event) => setSelectedMic(event.target.value)}>
-              {micDevices.length === 0 ? (
-                <option value="">No available microphones</option>
-              ) : (
-                micDevices.map((device) => (
-                  <option key={device.id} value={device.id}>
-                    {device.label}
-                  </option>
-                ))
-              )}
+          </label>
+          <label className="field-select">
+            <span><AudioLines size={16} /> Microphone</span>
+            <select value={selectedMicrophoneId} onChange={(event) => setSelectedMicrophoneId(event.target.value)}>
+              {microphoneDevices.length ? microphoneDevices.map((device) => <option key={device.id} value={device.id}>{device.label}</option>) : <option value="">No microphone detected</option>}
             </select>
+          </label>
+          <div className="device-permission-row">
+            <div className={`permission-icon ${permissionStatus === 'granted' ? 'permission-ok' : ''}`}><ShieldCheck size={18} /></div>
+            <div><strong>{permissionStatus === 'granted' ? 'Media permission granted' : permissionStatus === 'blocked' ? 'Permission blocked' : 'Permission not requested'}</strong><small>Requests camera and microphone access from the desktop webview.</small></div>
+            <button type="button" className="button-secondary" onClick={() => void requestMediaPermissions()}>Request access</button>
           </div>
-
-          <button type="button" className="secondary-button" onClick={() => void startCameraPreview()}>
-            <Video size={16} />
-            Reconnect camera
-          </button>
-          <button type="button" className="secondary-button" onClick={() => void requestMediaPermission()}>
-            <ShieldCheck size={16} />
-            {permissionState === 'granted' ? 'Refresh permissions' : 'Request access'}
-          </button>
         </div>
-
-        <div className="stacked-card">
-          <p className="eyebrow">Live preview</p>
-          <div className="mini-preview">
-            {cameraReady ? (
-              <video ref={videoRef} autoPlay playsInline muted className="mini-video" />
-            ) : (
-              <div className="empty-state compact">
-                <Camera size={24} />
-                <span>Camera not active</span>
-              </div>
-            )}
+        <div className="device-preview-card">
+          <div className="device-preview-heading"><span className="field-overline">Local camera check</span><span className={`connection-badge ${cameraStream ? 'is-live' : 'is-idle'}`}>{cameraStream ? 'Preview active' : 'Waiting'}</span></div>
+          <div className="device-preview-video">
+            {cameraStream ? <video ref={attachCameraVideo} autoPlay playsInline muted aria-label="Device camera test preview" /> : <div className="video-placeholder"><Camera size={23} /><strong>No camera preview</strong></div>}
           </div>
-          {streamError ? (
-            <div className="error-box">
-              <CircleAlert size={16} />
-              <span>{streamError}</span>
-            </div>
-          ) : (
-            <div className="success-box">
-              <CheckCircle2 size={16} />
-              <span>
-                {permissionState === 'granted'
-                  ? 'Media permissions are ready and the device list is active.'
-                  : 'Permissions are pending. Grant access to finish the media setup.'}
-              </span>
-            </div>
-          )}
+          <div className="notice-box"><AlertCircle size={16} /><span>Lucy 2.5 transforms video only. Microphone selection is available for device management; microphone audio is not sent to this model.</span></div>
         </div>
       </div>
-    </div>
+    </section>
   )
 
   const renderHistory = () => (
-    <div className="panel">
-      <div className="panel-header">
-        <div>
-          <p className="eyebrow">Session history</p>
-          <h2>Recent local recordings and setup sessions</h2>
+    <section className="page-card">
+      <div className="page-heading"><div><p className="eyebrow">Local session history</p><h1>Recent activity</h1><p>Connection and control events saved on this device.</p></div></div>
+      {history.length ? (
+        <div className="history-list">
+          {history.map((record) => (
+            <article key={record.id} className="history-row">
+              <div className={`history-mark ${record.status.toLowerCase()}`}><Clock3 size={16} /></div>
+              <div className="history-details"><strong>{record.title}</strong><span>{record.detail}</span></div>
+              <span className={`history-state ${record.status.toLowerCase()}`}>{record.status}</span>
+              <time>{record.createdAt}</time>
+            </article>
+          ))}
         </div>
-      </div>
-
-      <div className="history-list">
-        {sessionHistory.map((item) => (
-          <div key={item.id} className="history-item">
-            <div>
-              <h4>{item.title} — {item.timestamp}</h4>
-              <p>{item.note}</p>
-            </div>
-            <span className={`history-badge ${item.status === 'Ready' ? 'success' : item.status === 'Blocked' ? 'warning' : 'neutral'}`}>
-              {item.status}
-            </span>
-          </div>
-        ))}
-      </div>
-    </div>
+      ) : (
+        <div className="empty-page-state"><Clock3 size={24} /><strong>No sessions yet</strong><span>Your local connection history will appear here.</span></div>
+      )}
+    </section>
   )
 
   const renderSettings = () => (
-    <div className="panel">
-      <div className="panel-header">
-        <div>
-          <p className="eyebrow">Settings</p>
-          <h2>Application preferences</h2>
-        </div>
+    <section className="page-card">
+      <div className="page-heading"><div><p className="eyebrow">Preferences</p><h1>Studio settings</h1><p>Configure prompt and local device behavior.</p></div></div>
+      <div className="settings-list">
+        <label className="setting-row"><div><strong>Prompt expansion</strong><small>Allow Lucy to expand or enhance the prompt before applying it.</small></div><input type="checkbox" checked={settings.enablePromptExpansion} onChange={(event) => setSettings((current) => ({ ...current, enablePromptExpansion: event.target.checked }))} /></label>
+        <label className="setting-row"><div><strong>Refresh devices after camera connection</strong><small>Update the device list after camera permissions are granted.</small></div><input type="checkbox" checked={settings.autoRefreshDevices} onChange={(event) => setSettings((current) => ({ ...current, autoRefreshDevices: event.target.checked }))} /></label>
       </div>
-
-      <div className="settings-grid">
-        <label className="toggle-row">
-          <span>Auto-refresh devices</span>
-          <input
-            type="checkbox"
-            checked={settings.autoRefresh}
-            onChange={(event) => updateSettings({ ...settings, autoRefresh: event.target.checked })}
-          />
-        </label>
-
-        <label className="toggle-row">
-          <span>Enable NamiFusion credentials route</span>
-          <input
-            type="checkbox"
-            checked={settings.nfcEnabled}
-            onChange={(event) => updateSettings({ ...settings, nfcEnabled: event.target.checked })}
-          />
-        </label>
-
-        <label className="field-label">
-          Output routing
-          <select
-            value={settings.outputMode}
-            onChange={(event) => {
-              const nextMode = event.target.value as AppSettings['outputMode']
-              applyOutputWarnings(nextMode)
-              void updateSettings({ ...settings, outputMode: nextMode })
-            }}
-          >
-            <option value="virtual-camera">Virtual camera</option>
-            <option value="speaker-audio">Speaker audio</option>
-          </select>
-        </label>
-
-        <label className="field-label">
-          NamiFusion API key
-          <input
-            type="password"
-            value={settings.namifusionApiKey}
-            onChange={(event) => updateSettings({ ...settings, namifusionApiKey: event.target.value })}
-            placeholder="Enter live face-swap key"
-          />
-        </label>
-
-        <div className="info-card">
-          <p>Last saved</p>
-          <strong>{savedAt}</strong>
-        </div>
-      </div>
-    </div>
+      <div className="secure-config-card"><ShieldCheck size={19} /><div><strong>API credentials stay in the backend</strong><p>FAL_KEY is read by the Rust/Tauri process environment. It is never stored in app settings or exposed to frontend code. Set the key before launching the desktop app.</p></div></div>
+      {settingsError ? <div className="error-banner" role="alert"><AlertCircle size={16} /><span>{settingsError}</span></div> : null}
+    </section>
   )
 
   const renderDiagnostics = () => (
-    <div className="panel">
-      <div className="panel-header">
-        <div>
-          <p className="eyebrow">Diagnostics</p>
-          <h2>System health and runtime checks</h2>
-        </div>
-      </div>
-
+    <section className="page-card">
+      <div className="page-heading"><div><p className="eyebrow">Runtime health</p><h1>Diagnostics</h1><p>Live state only; credentials are never inspected or displayed.</p></div></div>
       <div className="diagnostic-grid">
-        <div className="info-card">
-          <p>Operating system</p>
-          <strong>{navigator.userAgent}</strong>
-        </div>
-        <div className="info-card">
-          <p>Camera permission</p>
-          <strong>{cameraReady ? 'Granted' : 'Pending or blocked'}</strong>
-        </div>
-        <div className="info-card">
-          <p>Voice route</p>
-          <strong>{selectedVoice?.name ?? 'No voice selected'}</strong>
-        </div>
-        <div className="info-card">
-          <p>NamiFusion</p>
-          <strong>{hasNamiFusionKey ? 'Key present' : 'Waiting for API key'}</strong>
-        </div>
-        <div className="info-card">
-          <p>Output target</p>
-          <strong>{settings.outputMode === 'virtual-camera' ? 'System virtual camera (not verified)' : 'System speaker output'}</strong>
-        </div>
-        <div className="info-card">
-          <p>Realtime voice</p>
-          <strong>{liveVoiceConversionSupported ? 'Supported by current config' : 'Not supported without provider validation'}</strong>
-        </div>
+        <div className="diagnostic-cell"><span><Wifi size={16} /> Endpoint</span><strong>{ENDPOINT}</strong></div>
+        <div className="diagnostic-cell"><span><Activity size={16} /> Session state</span><strong>{statusLabel[sessionState]}</strong></div>
+        <div className="diagnostic-cell"><span><ShieldCheck size={16} /> API token</span><strong>{apiState === 'connected' ? 'Short-lived token used' : apiState === 'token-issued' ? 'Token issued (120s)' : apiState === 'requesting' ? 'Request in progress' : apiState === 'error' ? 'Request failed' : 'Not requested'}</strong></div>
+        <div className="diagnostic-cell"><span><Camera size={16} /> Camera permission</span><strong>{permissionStatus === 'granted' ? 'Granted' : permissionStatus === 'blocked' ? 'Denied or unavailable' : 'Not requested'}</strong></div>
+        <div className="diagnostic-cell"><span><Video size={16} /> Remote video</span><strong>{remoteStream ? 'Remote track received' : 'No remote track received'}</strong></div>
+        <div className="diagnostic-cell"><span><Cpu size={16} /> Runtime</span><strong>{isTauri() ? 'Tauri desktop webview' : 'Browser development preview'}</strong></div>
       </div>
-    </div>
+      <div className="notice-box diagnostics-notice"><AlertCircle size={16} /><span>WebRTC operation, camera/microphone permissions, and model output still require real-device testing on macOS and Windows. No virtual camera or virtual audio output is implemented.</span></div>
+    </section>
   )
 
-  const renderAbout = () => (
-    <div className="panel">
-      <div className="panel-header">
-        <div>
-          <p className="eyebrow">About</p>
-          <h2>Installation and platform notes</h2>
-        </div>
-      </div>
-
-      <div className="about-grid">
-        <div className="info-card">
-          <p>Desktop runtime</p>
-          <strong>Tauri 2 + React + TypeScript</strong>
-        </div>
-        <div className="info-card">
-          <p>macOS</p>
-          <strong>Intel 2020 MacBook Pro support is the baseline target, with Xcode CLT required.</strong>
-        </div>
-        <div className="info-card">
-          <p>Windows</p>
-          <strong>Windows 10/11 is the target, but native virtual-camera packaging must be validated on a Windows machine.</strong>
-        </div>
-        <div className="info-card">
-          <p>Third-party reliance</p>
-          <strong>NamiFusion requires a valid API key, internet access, and a tested native output path. Public docs mention API-key access and face-swap tooling, but no public realtime streaming contract was found for this implementation.</strong>
-        </div>
-      </div>
-    </div>
-  )
-
-  const contentMap: Record<ScreenName, ReturnType<typeof renderStudio>> = {
+  const screenContent: Record<ScreenName, ReturnType<typeof renderStudio>> = {
     studio: renderStudio(),
     identity: renderIdentity(),
-    voice: renderVoice(),
     devices: renderDevices(),
     history: renderHistory(),
     settings: renderSettings(),
     diagnostics: renderDiagnostics(),
-    about: renderAbout(),
   }
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand-wrap">
-          <div className="brand-mark">R</div>
-          <div>
-            <p className="eyebrow">Identity studio</p>
-            <h1>Real-Time AI Virtual Identity Studio</h1>
-          </div>
-        </div>
-
-        <nav className="sidebar-nav" aria-label="Main navigation">
-          {navItems.map(({ id, label, icon: Icon }) => (
-            <button
-              key={id}
-              type="button"
-              className={`nav-button ${activeScreen === id ? 'active' : ''}`}
-              onClick={() => setActiveScreen(id)}
-            >
-              <Icon size={18} />
-              <span>{label}</span>
-              <ChevronRight size={14} />
+        <button type="button" className="brand-lockup" onClick={() => setActiveScreen('studio')}>
+          <span className="brand-glyph">L<span>F</span></span>
+          <span><strong>Lumaform</strong><small>AI VIDEO STUDIO</small></span>
+        </button>
+        <div className="workspace-label">WORKSPACE</div>
+        <nav className="sidebar-nav" aria-label="Studio navigation">
+          {NAV_ITEMS.map(({ id, label, icon: Icon }) => (
+            <button key={id} type="button" className={`nav-item ${activeScreen === id ? 'active' : ''}`} onClick={() => setActiveScreen(id)}>
+              <Icon size={17} strokeWidth={1.8} /><span>{label}</span>{activeScreen === id ? <span className="active-mark" /> : null}
             </button>
           ))}
         </nav>
+        <div className="sidebar-bottom">
+          <div className="sidebar-provider">
+            <div className="provider-mark"><Sparkles size={15} /></div>
+            <div><small>POWERED BY</small><strong>fal.ai · Lucy 2.5</strong></div>
+            <span className={`provider-pulse ${apiState === 'connected' ? 'active' : ''}`} />
+          </div>
+          <div className="sidebar-footnote"><ShieldCheck size={14} /><span>Private credentials · local settings</span></div>
+        </div>
       </aside>
 
-      <main className="content-area">
-        <audio ref={audioRef} src={voiceAudioUrl ?? selectedVoice?.source ?? undefined} preload="auto" />
-
+      <main className="main-area">
         <header className="topbar">
-          <div>
-            <p className="eyebrow">Connected session</p>
-            <h2>{settings.identityName}</h2>
-          </div>
-          <div className="topbar-actions">
-            <span className={`status-pill ${cameraReady ? 'status-on' : 'status-idle'}`}>
-              {cameraReady ? 'Camera ready' : 'Camera pending'}
-            </span>
-            <button type="button" className="primary-button" onClick={() => setActiveScreen('studio')}>
-              Open Studio
-              <ArrowRight size={16} />
-            </button>
+          <div className="breadcrumb"><span>Workspace</span><span className="breadcrumb-slash">/</span><strong>{currentScreenLabel}</strong></div>
+          <div className="topbar-right">
+            <div className={`topbar-status ${statusClass}`}><span className="status-dot" />{statusLabel[sessionState]}</div>
+            <button type="button" className="topbar-icon" onClick={() => setActiveScreen('diagnostics')} title="Diagnostics" aria-label="Open diagnostics"><Activity size={17} /></button>
+            <div className="avatar">LF</div>
           </div>
         </header>
-
-        {contentMap[activeScreen]}
+        <div className="page-content">{screenContent[activeScreen]}</div>
+        <footer className="app-footer"><span><span className="footer-status-dot" /> LOCAL DESKTOP SESSION</span><span>Lucy 2.5 · WebRTC · fal.ai</span></footer>
       </main>
     </div>
   )

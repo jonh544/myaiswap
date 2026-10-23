@@ -1,12 +1,12 @@
-# Real-Time AI Virtual Identity Studio
+# Real-Time AI Video Studio
 
-A native desktop studio for local identity previews, live camera capture, microphone and voice routing, and provider-backed realtime face-swap/voice conversion workflows.
+A native Tauri desktop studio for camera-based, real-time video transformation with fal.ai Lucy 2.5.
 
 ## Current status
 
-This project is scaffolded and the desktop UI has been implemented as a Tauri 2 + React + TypeScript app with a functional studio layout, identity workflow, voice profiles, device selection, diagnostics, and installation notes.
+The application uses the official `@fal-ai/client` package for fal realtime connections and WebSocket signaling, with WebRTC media transport for Lucy's returned video. Local camera preview and remote transformed stream are shown separately; the transformed preview is never replaced with the local webcam feed.
 
-The app is designed to run as a desktop application on macOS and Windows. It includes local preview logic that works without external provider credentials, while API-backed services such as NamiFusion and live voice conversion are clearly marked as provider-dependent features.
+The Rust/Tauri backend requests a short-lived token restricted to `decart/lucy-2-5/realtime`. It reads `FAL_KEY` only from its process environment. The key is not stored in the frontend, settings, or a `VITE_` variable.
 
 ## Requirements
 
@@ -20,8 +20,8 @@ The app is designed to run as a desktop application on macOS and Windows. It inc
 ### Windows
 
 - Windows 10 and 11 are the target support range.
-- Native virtual-camera packaging and permissions must be validated on a supported Windows machine.
-- The Windows-specific virtual camera mechanism is not fully testable from a macOS environment.
+- Camera and microphone permission prompts must be validated on a supported Windows machine.
+- The Windows WebView2 WebRTC and media-device flow is not testable from a macOS environment.
 
 ## Prerequisites
 
@@ -44,6 +44,24 @@ npm install
 npm run dev
 ```
 
+## Configure fal.ai
+
+Set `FAL_KEY` in the environment used to launch the Tauri process. Do not put it in a `VITE_` variable or commit it.
+
+```bash
+export FAL_KEY="your-fal-api-key"
+npx tauri dev
+```
+
+On PowerShell:
+
+```powershell
+$env:FAL_KEY = "your-fal-api-key"
+npx tauri dev
+```
+
+`.env.example` documents the variable name only; Vite does not load or expose the key to the frontend. Lucy's realtime endpoint requires internet access and account access to the model.
+
 ## Production build
 
 ```bash
@@ -58,9 +76,9 @@ npx tauri dev
 
 ## Platform notes
 
-- macOS: virtual camera creation and routing require a native component and codesigning/entitlements validation on a real macOS machine.
-- Windows: virtual camera support depends on the Windows-supported camera APIs and packaging flow, which must be reviewed and validated on Windows.
-- This repository intentionally keeps local functionality independent from a remote provider so the app remains usable during offline or credential-missing states.
+- macOS and Windows camera/microphone permissions, WebRTC connectivity, and Lucy output require real-device testing on each target OS.
+- Microphone selection is provided for device management, but Lucy 2.5 is a video-to-video endpoint and does not process microphone audio.
+- No virtual camera or virtual audio output implementation is included or claimed.
 
 ## Project structure
 
@@ -68,6 +86,6 @@ npx tauri dev
 - `src-tauri/` — Rust backend and Tauri configuration
 - `docs/BUILD-ARCHITECTURE.md` — platform architecture and component guidance
 
-## Important caveat
+## Media and provenance
 
-The real NamiFusion face-swap API and a genuine realtime voice-conversion engine are external services. This app includes the required integration strategy and workflow states explicitly, but actual cloud API calls or native virtual-device drivers must be implemented and signed for each target OS before claiming full runtime completion.
+The character reference must be PNG, JPEG, or WebP and at least 512 × 512 pixels. The app passes the selected image as Lucy's documented `reference_image_url` input and sends camera video as a WebRTC stream. Provider watermarking/provenance is preserved.
